@@ -1,152 +1,157 @@
-- name: Install Ubuntu on RK1
-  hosts: 127.0.0.1
-  connection: local
-  vars_files:
-    - vars/vault.yml
-  vars:
-    download_url: https://firmware.turingpi.com/turing-rk1/ubuntu_22.04_rockchip_linux/v1.33/ubuntu-22.04.3-preinstalled-server-arm64-turing-rk1_v1.33.img.xz
-    compressed_image_path: ./Downloads/ubuntu-22.04.3-preinstalled-server-arm64-turing-rk1_v1.33.img.xz
-    extracted_image_path: ./Downloads/ubuntu-22.04.3-preinstalled-server-arm64-turing-rk1_v1.33.img
-    tpi_host: "10.10.30.76"
-    tpi_user: "root"
-    create_user_script: "https://raw.githubusercontent.com/StoneMonarch/Homelab-Ansible/refs/heads/master/create-user.sh"
-    configure_network_script: "https://raw.githubusercontent.com/StoneMonarch/Homelab-Ansible/refs/heads/master/configure-network.sh"
+---
+# roles/turing-pi/tasks/install_os.yml
 
-  tasks:
-    - name: make sure tpi installed
-      become: yes
-      apt:
+- name: Install prerequisites
+  block:
+    - name: Ensure TPI utility is installed
+      ansible.builtin.apt:
         deb: https://firmware.turingpi.com/tpi/debian/tpi_1.0.5-1_amd64.deb
-
-    - name: Install xz
+        state: present
       become: yes
-      apt:
+
+    - name: Install required utilities
+      ansible.builtin.apt:
         pkg:
           - xz-utils
+          - curl
+        state: present
+      become: yes
+
+- name: Prepare OS image
+  block:
+    - name: Create download directory
+      ansible.builtin.file:
+        path: "{{ ubuntu_image.compressed_path | dirname }}"
+        state: directory
+        mode: 0755
 
     - name: Download Ubuntu image for RK1
-      get_url:
-        url: "{{ download_url }}"
-        dest: "{{ compressed_image_path }}"
+      ansible.builtin.get_url:
+        url: "{{ ubuntu_image.url }}"
+        dest: "{{ ubuntu_image.compressed_path }}"
         mode: 0644
+      register: download_result
 
     - name: Extract xz archive
-      command:
-        cmd: "unxz --keep {{ compressed_image_path }}"
-        creates: "{{ extracted_image_path }}"
+      ansible.builtin.command:
+        cmd: "unxz --keep {{ ubuntu_image.compressed_path }}"
+        creates: "{{ ubuntu_image.extracted_path }}"
+      when: download_result.changed or not ansible_check_mode
 
+- name: Get active nodes for installation
+  block:
     - name: Get hosts from turingpinodes group
-      set_fact:
+      ansible.builtin.set_fact:
         turingpi_hosts: "{{ groups['turingpinodes'] | default([]) }}"
 
     - name: Display number of nodes found
-      debug:
+      ansible.builtin.debug:
         msg: "Found {{ turingpi_hosts | length }} nodes in the turingpinodes group"
 
-    - name: Process each node in turingpinodes group
-      when: turingpi_hosts | length > 0
-      loop: "{{ turingpi_hosts }}"
-      loop_control:
-        loop_var: item
+- name: Notify if no nodes found
+  ansible.builtin.debug:
+    msg: "No nodes found in the turingpinodes group"
+  when: turingpi_hosts | length == 0
+
+- name: Process each node in turingpinodes group
+  when: turingpi_hosts | length > 0
+  loop: "{{ turingpi_hosts }}"
+  loop_control:
+    loop_var: item
+  block:
+    - name: Set node Specific Vars
+      set_fact:
+        node_id: "{{ (hostvars[item]['inventory_hostname'] | regex_search('(\\d+)$') | last) | replace('0', '') }}"
+
+    - name: Flash Node with img Using TPI
+      command:
+        cmd: "tpi --host {{ tpi_host }} --user {{ tpi_user }} --password {{ tpi_password }} flash --image-path {{ image_path }} --node {{ node_id }} --json"
+      register: flash_result
+      failed_when: flash_result.rc != 0
+
+    - name: Power on Node
+      command:
+        cmd: "tpi power --host {{ tpi_host }} --user {{ tpi_user }} --password {{ tpi_password }} --node {{ node_id }} on"
+      register: power_result
+      failed_when: power_result.rc != 0
+
+    - name: Wait for Node to boot
+      pause:
+        seconds: 60
+
+    # Login sequence with error checking
+    - name: Set up new user credentials
       block:
-        - name: Set node Specific Vars
-          set_fact:
-            node_id: "{{ (hostvars[item]['inventory_hostname'] | regex_search('(\\d+)$') | last) | replace('0', '') }}"
-
-        - name: Flash Node with img Using TPI
+        - name: Enter default username
           command:
-            cmd: "tpi --host {{ tpi_host }} --user {{ tpi_user }} --password {{ tpi_password }} flash --image-path {{ image_path }} --node {{ node_id }} --json"
-          register: flash_result
-          failed_when: flash_result.rc != 0
+            cmd: "tpi uart --node {{ node_id }} --host {{ tpi_host }} --user {{ tpi_user }} --password {{ tpi_password }} set --cmd 'ubuntu'"
+          register: username_result
+          failed_when: username_result.rc != 0
 
-        - name: Power on Node
-          command:
-            cmd: "tpi power --host {{ tpi_host }} --user {{ tpi_user }} --password {{ tpi_password }} --node {{ node_id }} on"
-          register: power_result
-          failed_when: power_result.rc != 0
-
-        - name: Wait for Node to boot
+        - name: Wait for password prompt
           pause:
-            seconds: 60
+            seconds: 5
 
-        # Login sequence with error checking
-        - name: Set up new user credentials
-          block:
-            - name: Enter default username
-              command:
-                cmd: "tpi uart --node {{ node_id }} --host {{ tpi_host }} --user {{ tpi_user }} --password {{ tpi_password }} set --cmd 'ubuntu'"
-              register: username_result
-              failed_when: username_result.rc != 0
+        - name: Enter default password
+          command:
+            cmd: "tpi uart --node {{ node_id }} --host {{ tpi_host }} --user {{ tpi_user }} --password {{ tpi_password }} set --cmd 'ubuntu'"
+          register: password_result
+          failed_when: password_result.rc != 0
 
-            - name: Wait for password prompt
-              pause:
-                seconds: 5
-
-            - name: Enter default password
-              command:
-                cmd: "tpi uart --node {{ node_id }} --host {{ tpi_host }} --user {{ tpi_user }} --password {{ tpi_password }} set --cmd 'ubuntu'"
-              register: password_result
-              failed_when: password_result.rc != 0
-
-            - name: Wait for password reset prompt
-              pause:
-                seconds: 10
-
-            - name: Confirm current password
-              command:
-                cmd: "tpi uart --node {{ node_id }} --host {{ tpi_host }} --user {{ tpi_user }} --password {{ tpi_password }} set --cmd 'ubuntu'"
-              register: confirm_result
-              failed_when: confirm_result.rc != 0
-
-            - name: Enter new password
-              command:
-                cmd: "tpi uart --node {{ node_id }} --host {{ tpi_host }} --user {{ tpi_user }} --password {{ tpi_password }} set --cmd '{{ new_password }}'"
-              register: new_pass_result
-              failed_when: new_pass_result.rc != 0
-
-            - name: Confirm new password
-              command:
-                cmd: "tpi uart --node {{ node_id }} --host {{ tpi_host }} --user {{ tpi_user }} --password {{ tpi_password }} set --cmd '{{ new_password }}'"
-              register: confirm_new_result
-              failed_when: confirm_new_result.rc != 0
-
-        - name: Wait for prompt to reset
+        - name: Wait for password reset prompt
           pause:
             seconds: 10
 
-        - name: Create ansible user
+        - name: Confirm current password
           command:
-            cmd: >
-              tpi uart --node {{ node_id }} --host {{ tpi_host }} --user {{ tpi_user }} --password {{ tpi_password }} set --cmd
-              "curl {{ create_user_script }} > create-user.sh &&
-              chmod +x create-user.sh &&
-              sudo ./create-user.sh ansible '{{ user_password }}' '{{ ssh_key }}' &&
-              rm create-user.sh"
-          register: user_creation
-          failed_when: user_creation.rc != 0
+            cmd: "tpi uart --node {{ node_id }} --host {{ tpi_host }} --user {{ tpi_user }} --password {{ tpi_password }} set --cmd 'ubuntu'"
+          register: confirm_result
+          failed_when: confirm_result.rc != 0
 
-        - name: Wait for prompt to reset
-          pause:
-            seconds: 10
-
-        - name: Configure network
+        - name: Enter new password
           command:
-            cmd: >
-              tpi uart --node {{ node_id }} --host {{ tpi_host }} --user {{ tpi_user }} --password {{ tpi_password }} set --cmd 
-              "curl {{ configure_network_script }} > configure-network.sh &&
-              chmod +x configure-network.sh && 
-              sudo ./configure-network.sh {{ hostvars[item]['ansible_host'] }} 10.10.40.{{ hostvars[item]['ansible_host'].split('.')[-1] }} 10.10.30.1 10.10.30.1 && 
-              rm configure-network.sh"
-          register: network_configuration
-          failed_when: network_configuration.rc != 0
+            cmd: "tpi uart --node {{ node_id }} --host {{ tpi_host }} --user {{ tpi_user }} --password {{ tpi_password }} set --cmd '{{ new_password }}'"
+          register: new_pass_result
+          failed_when: new_pass_result.rc != 0
 
-        - name: Exit out of UART terminal
+        - name: Confirm new password
           command:
-            cmd: tpi uart --node {{ node_id }} --host {{ tpi_host }} --user {{ tpi_user }} --password {{ tpi_password }} set --cmd "exit"
-          register: exit_uart
-          failed_when: exit_uart.rc != 0
+            cmd: "tpi uart --node {{ node_id }} --host {{ tpi_host }} --user {{ tpi_user }} --password {{ tpi_password }} set --cmd '{{ new_password }}'"
+          register: confirm_new_result
+          failed_when: confirm_new_result.rc != 0
 
-    - name: Notify if no nodes found
-      debug:
-        msg: "No nodes found in the turingpinodes group"
-      when: turingpi_hosts | length == 0
+    - name: Wait for prompt to reset
+      pause:
+        seconds: 10
+
+    - name: Create ansible user
+      command:
+        cmd: >
+          tpi uart --node {{ node_id }} --host {{ tpi_host }} --user {{ tpi_user }} --password {{ tpi_password }} set --cmd
+          "curl {{ create_user_script }} > create-user.sh &&
+          chmod +x create-user.sh &&
+          sudo ./create-user.sh ansible '{{ user_password }}' '{{ ssh_key }}' &&
+          rm create-user.sh"
+      register: user_creation
+      failed_when: user_creation.rc != 0
+
+    - name: Wait for prompt to reset
+      pause:
+        seconds: 10
+
+    - name: Configure network
+      command:
+        cmd: >
+          tpi uart --node {{ node_id }} --host {{ tpi_host }} --user {{ tpi_user }} --password {{ tpi_password }} set --cmd 
+          "curl {{ configure_network_script }} > configure-network.sh &&
+          chmod +x configure-network.sh && 
+          sudo ./configure-network.sh {{ hostvars[item]['ansible_host'] }} 10.10.40.{{ hostvars[item]['ansible_host'].split('.')[-1] }} 10.10.30.1 10.10.30.1 && 
+          rm configure-network.sh"
+      register: network_configuration
+      failed_when: network_configuration.rc != 0
+
+    - name: Exit out of UART terminal
+      command:
+        cmd: tpi uart --node {{ node_id }} --host {{ tpi_host }} --user {{ tpi_user }} --password {{ tpi_password }} set --cmd "exit"
+      register: exit_uart
+      failed_when: exit_uart.rc != 0
