@@ -1,0 +1,47 @@
+# install-ubuntu-rk1.yml
+# Main playbook for installing Ubuntu on Turing Pi RK1 nodes
+
+- name: Install Ubuntu on RK1 Nodes and set up ansible access
+  hosts: localhost
+  connection: local
+  vars_files:
+    - vars/vault.yml
+  vars:
+    ubuntu_image:
+      download_url: https://firmware.turingpi.com/turing-rk1/ubuntu_22.04_rockchip_linux/v1.33/ubuntu-22.04.3-preinstalled-server-arm64-turing-rk1_v1.33.img.xz
+      compressed_image_path: ./Downloads/ubuntu-22.04.3-preinstalled-server-arm64-turing-rk1_v1.33.img.xz
+      extracted_image_path: ./Downloads/ubuntu-22.04.3-preinstalled-server-arm64-turing-rk1_v1.33.img
+
+    #Turing PI2 BMC
+    tpi_host: "{{ hostvars.turingpi.ansible_host }}"
+    tpi_user: "{{ hostvars.turingpi.ansible_user }}"
+
+  pre_tasks:
+    - name: Check if TuringPi BMC is accessible
+      ping:
+        host: "{{ tpi_host }}"
+        timeout: 10
+      register: bmc_check
+      ignore_errors: yes
+
+    - name: Fail if BMC is not accessible
+      ansible.builtin.fail:
+        msg: "Cannot connect to Turing Pi BMC at {{ tpi_host }}. Please check connection and credentials."
+      when: bmc_check is failed
+
+  roles:
+    - role: turing-pi
+      tasks_from: install_os
+
+  post_tasks:
+    - name: Check if nodes are accessible via SSH
+      ansible.builtin.wait_for:
+        host: "{{ hostvars[item].ansible_host }}"
+        port: 22
+        timeout: 300
+        delay: 60
+      loop: "{{ groups['turingpinodes'] }}"
+
+    - name: Report installation status
+      ansible.builtin.debug:
+        msg: "Ubuntu successfully installed on all nodes in the turingpinodes group"
