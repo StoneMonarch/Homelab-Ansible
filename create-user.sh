@@ -19,7 +19,7 @@ SSH_KEY=$3
 echo "Creating user: $USERNAME"
 useradd -m -s /bin/bash "$USERNAME"
 
-# Set password using hashed method
+# Set password (non-interactively)
 echo "Setting password for $USERNAME"
 echo "$USERNAME:$PASSWORD" | chpasswd
 
