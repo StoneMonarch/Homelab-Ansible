@@ -1,0 +1,13 @@
+- name: Update RK1 Nodes
+  hosts: turingpinodes
+
+  tasks:
+    - name: Update RK1 nodes
+      become: yes
+      apt:
+        update_cache: yes
+        upgrade: yes
+
+    - name: Reboot and wait for nodes to boot
+      reboot:
+        reboot_timeout: 3600
