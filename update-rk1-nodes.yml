@@ -9,5 +9,6 @@
         upgrade: yes
 
     - name: Reboot and wait for nodes to boot
+      become: yes
       reboot:
         reboot_timeout: 3600
